@@ -14,6 +14,7 @@ from app.tools.registry import (
     execute_tool,
     get_ollama_tool_definitions,
 )
+from app.tracing import record_event
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ async def run_turn(
             pending_confirmation.tool, pending_confirmation.arguments, pending_confirmation.token
         ):
             logger.warning("Confirmation token mismatch for tool %s — refusing to execute", pending_confirmation.tool)
+            record_event("confirmation_token_rejected", tool=pending_confirmation.tool)
             return (
                 "Sorry, I couldn't verify that confirmation — it may be out of date. "
                 "Could you tell me again what you'd like to do?",
@@ -106,6 +108,12 @@ async def run_turn(
         if confirm:
             outcome = await _run_tool_call(
                 session, pending_confirmation.tool, pending_confirmation.arguments, confirmed=True
+            )
+            record_event(
+                "confirmation_resolved",
+                tool=pending_confirmation.tool,
+                confirmed=True,
+                ok=outcome.get("ok"),
             )
             # role "system", not "user" — this is orchestrator-authored instruction
             # text, not something the customer said. It also matters mechanically:
@@ -123,6 +131,7 @@ async def run_turn(
                 }
             )
         else:
+            record_event("confirmation_resolved", tool=pending_confirmation.tool, confirmed=False)
             chat_history.append(
                 {
                     "role": "system",
@@ -149,6 +158,7 @@ async def run_turn(
 
             try:
                 outcome = await execute_tool(session, name, arguments)
+                record_event("tool_call", name=name, arguments=arguments, ok=outcome.get("ok"))
             except ConfirmationRequiredError as exc:
                 # Any tool calls from this same batch that come after a
                 # confirmation-gated one are dropped, not executed — the model
@@ -156,6 +166,7 @@ async def run_turn(
                 # Arguments here are the schema-validated ones, not the raw model
                 # output, so the customer never sees a confirmation built from
                 # malformed/missing fields.
+                record_event("confirmation_requested", tool=exc.tool_name, arguments=exc.validated_arguments)
                 summary = _build_confirmation_summary(exc.tool_name, exc.validated_arguments)
                 reply = f"I'd like to {summary}. Should I go ahead?"
                 token = sign_confirmation(exc.tool_name, exc.validated_arguments)
@@ -164,10 +175,12 @@ async def run_turn(
                 )
             except (UnknownToolError, InvalidToolArgumentsError) as exc:
                 outcome = {"ok": False, "error": str(exc)}
+                record_event("tool_call", name=name, arguments=arguments, ok=False, error=str(exc))
 
             chat_history.append({"role": "assistant", "content": "", "tool_calls": [call]})
             chat_history.append({"role": "tool", "content": str(outcome)})
 
+    record_event("max_iterations_exceeded", limit=MAX_TOOL_ITERATIONS)
     return (
         _screen("I'm having trouble completing this request right now. Let me escalate this to a human agent."),
         None,

@@ -4,6 +4,7 @@ from typing import Any
 from app.guardrails.input_guardrail import GUARDRAIL_REMINDER, screen_input
 from app.guardrails.output_guardrail import screen_output
 from app.llm.base import LLMProvider
+from app.tracing import record_event
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class GuardrailedLLMProvider(LLMProvider):
         )
         if last_user_text and screen_input(last_user_text).flagged:
             logger.warning("Input guardrail flagged a message as a likely prompt injection attempt")
+            record_event("input_flagged", message_preview=last_user_text[:200])
             return [*messages, {"role": "system", "content": GUARDRAIL_REMINDER}]
         return messages
 
@@ -44,6 +46,7 @@ class GuardrailedLLMProvider(LLMProvider):
         result = screen_output(text, self._system_prompt)
         if result.blocked:
             logger.warning("Output guardrail blocked a reply (%s)", result.reason)
+            record_event("output_blocked", reason=result.reason, original_preview=text[:200])
             return result.safe_text
         return text
 

@@ -1,7 +1,9 @@
 import enum
 from datetime import date, datetime
+from typing import Any
 
-from sqlalchemy import Date, DateTime, Enum, ForeignKey, Numeric, Sequence, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Numeric, Sequence, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -129,3 +131,23 @@ class Ticket(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     customer: Mapped["Customer"] = relationship(back_populates="tickets")
+
+
+class AgentTrace(Base):
+    """One row per agent turn — a local, structured debugging trail (input/output
+    guardrail flags, tool calls, latency, errors) with nothing sent to any external
+    service. See app/tracing.py."""
+
+    __tablename__ = "agent_traces"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    user_message: Mapped[str] = mapped_column(Text)
+    reply: Mapped[str] = mapped_column(Text)
+    events: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    tool_calls_count: Mapped[int] = mapped_column(default=0)
+    input_flagged: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    output_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    had_error: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0)

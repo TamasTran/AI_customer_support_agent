@@ -12,6 +12,7 @@ from app.db import engine, get_session
 from app.llm.exceptions import LLMModelNotFoundError, LLMUnavailableError
 from app.llm.factory import get_llm_provider
 from app.schemas import ChatRequest, ChatResponse, HealthResponse
+from app.tracing import TurnTrace, current_trace, save_trace
 
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
@@ -103,11 +104,27 @@ async def health():
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, session: AsyncSession = Depends(get_session)):
-    reply, pending_confirmation = await run_turn(
-        llm=llm,
-        session=session,
-        messages=request.messages,
-        pending_confirmation=request.pending_confirmation,
-        confirm=request.confirm,
-    )
+    trace = TurnTrace()
+    trace_token = current_trace.set(trace)
+    reply, pending_confirmation = "", None
+    turn_error: Exception | None = None
+    try:
+        reply, pending_confirmation = await run_turn(
+            llm=llm,
+            session=session,
+            messages=request.messages,
+            pending_confirmation=request.pending_confirmation,
+            confirm=request.confirm,
+        )
+    except Exception as exc:
+        turn_error = exc
+        raise
+    finally:
+        current_trace.reset(trace_token)
+        last_user_text = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
+        try:
+            await save_trace(session, user_message=last_user_text, reply=reply, trace=trace, error=turn_error)
+        except Exception:
+            # Tracing must never break the actual chat response.
+            logger.exception("Failed to persist agent trace")
     return ChatResponse(reply=reply, pending_confirmation=pending_confirmation)

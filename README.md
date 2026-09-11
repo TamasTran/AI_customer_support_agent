@@ -80,6 +80,21 @@ older `deprecated` version of a policy can never outrank the current one —
 see `backend/knowledge/refund-policy-v3-deprecated.md` for a worked example
 kept in the repo specifically to exercise that filter.
 
+### Debugging a bad agent turn (tracing)
+
+Every `/api/chat` turn is recorded locally to Postgres — no external tracing
+service (no LangSmith, nothing leaves the machine): which tool calls ran and
+whether they succeeded, whether the input/output guardrails fired, total
+latency, and the error if the turn failed. See `app/tracing.py` /
+`AgentTrace` in `app/models.py`.
+
+```bash
+uv run python scripts/view_traces.py                  # recent turns
+uv run python scripts/view_traces.py --flagged-only    # guardrail-triggered turns
+uv run python scripts/view_traces.py --errors-only
+uv run python scripts/view_traces.py --id 42           # full event timeline for one turn
+```
+
 ## 5. Frontend setup
 
 ```bash
@@ -127,7 +142,8 @@ backend/
     agent/orchestrator.py  # the tool-calling loop + confirmation gate for mutating actions
     security.py         # HMAC-signs the confirm handshake so a client can't execute a
                          # mutating action against arguments other than what was proposed
-    models.py            # SQLAlchemy models (customers, orders, products, shipments, tickets)
+    tracing.py           # local structured trace log (agent_traces table) — no external service
+    models.py            # SQLAlchemy models (customers, orders, products, shipments, tickets, AgentTrace)
     db.py                # async SQLAlchemy session
     main.py               # FastAPI app: /api/health, /api/chat
   alembic/                # DB migrations (business tables only — the knowledge base table
@@ -138,6 +154,7 @@ backend/
     ingest_knowledge.py     # indexes backend/knowledge/*.md
     golden_dataset.py      # deterministic eval cases (normal/ambiguous/policy/injection/...)
     benchmark_agent.py      # runs the golden dataset against a live Ollama model
+    view_traces.py          # inspect recent agent_traces rows
   tests/                    # pytest suite (no live Ollama needed — see "Running tests")
 frontend/
   src/App.tsx         # minimal chat UI
@@ -160,7 +177,7 @@ local model before adding the next layer (see project plan):
 - [ ] Phase 8 — Human approval tier (beyond customer confirmation)
 - [x] Phase 9 — Guardrails (input prompt-injection screening, output PII/system-prompt-leak screening)
 - [ ] Phase 10 — Full evaluation suite (golden dataset + benchmark script exist; no CI gate on it yet)
-- [ ] Phase 11 — Observability/metrics dashboard
+- [x] Phase 11 (partial) — Local structured tracing per turn (tool calls, guardrail flags, latency, errors — see `scripts/view_traces.py`); no metrics dashboard/aggregation yet
 - [x] Phase 12 (partial) — CI (lint + test + typecheck + build on every push/PR); no Docker image / deployment pipeline yet
 
 ## A note on privacy vs. security
