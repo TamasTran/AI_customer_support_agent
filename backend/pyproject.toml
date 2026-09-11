@@ -20,4 +20,27 @@ dependencies = [
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# The module-level async engine's connections are bound to whichever event loop
+# created them; a per-test loop (pytest-asyncio's default) causes "another operation
+# in progress" errors when tests share that engine. Pin one loop for the session.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["alembic"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# E501: line length isn't worth failing CI over.
+# UP042: str+Enum (not enum.StrEnum) is deliberate — StrEnum has different str()/repr()
+# semantics that would need auditing everywhere these enums are serialized to JSON.
+# B008: Depends(...) in a function default is FastAPI's standard DI idiom, not a bug.
+ignore = ["E501", "UP042", "B008"]

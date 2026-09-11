@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 type Message = { role: "user" | "assistant"; content: string };
-type PendingConfirmation = { tool: string; arguments: Record<string, unknown>; summary: string };
+type PendingConfirmation = { tool: string; arguments: Record<string, unknown>; summary: string; token: string };
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);

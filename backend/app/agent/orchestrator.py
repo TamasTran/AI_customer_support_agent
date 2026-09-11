@@ -2,10 +2,11 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.guardrails.input_guardrail import GUARDRAIL_REMINDER, screen_input
+from app.guardrails.input_guardrail import screen_input
 from app.guardrails.output_guardrail import screen_output
 from app.llm.base import LLMProvider
 from app.schemas import ChatMessage, PendingConfirmation
+from app.security import sign_confirmation, verify_confirmation
 from app.tools.registry import (
     ConfirmationRequiredError,
     InvalidToolArgumentsError,
@@ -27,6 +28,13 @@ Rules you must follow:
 - If a tool call fails or returns ok=false, tell the customer honestly what went wrong. Never claim an action succeeded unless the tool result confirms it.
 - Keep responses concise and helpful."""
 
+# Input/output screening for text the LLM itself generates now happens at the
+# transport boundary (see app.guardrails.llm_wrapper.GuardrailedLLMProvider, wired in
+# by main.py) so every caller of `llm` gets it automatically. The two helpers below
+# still apply screen_output directly because they build customer-facing text in
+# *this* module without going through the LLM at all: the confirmation summary
+# (assembled from raw tool arguments) and the loop-exhausted fallback message.
+
 
 async def _run_tool_call(
     session: AsyncSession, name: str, arguments: dict, confirmed: bool = False
@@ -38,22 +46,34 @@ async def _run_tool_call(
         return {"ok": False, "error": str(exc)}
 
 
+def _sanitize_free_text(value: object) -> str:
+    """A free-text tool argument (e.g. a refund `reason`) came from the customer's
+    own message via the LLM, and is about to be echoed back into a confirmation
+    prompt. screen_output only catches PII/system-prompt leaks, not injected
+    instructions, so injected phrasing needs its own check here rather than being
+    quoted verbatim."""
+    text = str(value)
+    if screen_input(text).flagged:
+        return "(reason withheld for safety)"
+    return text
+
+
 def _build_confirmation_summary(tool_name: str, arguments: dict) -> str:
     if tool_name == "request_refund":
-        return f"process a refund for order {arguments.get('order_id')} (reason: {arguments.get('reason')})"
+        reason = _sanitize_free_text(arguments.get("reason"))
+        return f"process a refund for order {arguments.get('order_id')} (reason: {reason})"
     if tool_name == "cancel_order":
-        return f"cancel order {arguments.get('order_id')} (reason: {arguments.get('reason')})"
+        reason = _sanitize_free_text(arguments.get("reason"))
+        return f"cancel order {arguments.get('order_id')} (reason: {reason})"
     return f"perform {tool_name} with {arguments}"
 
 
-def _finalize_reply(reply: str) -> str:
-    """Every reply this module returns to the customer passes through here — the
-    single output-guardrail checkpoint, regardless of which code path produced it."""
-    result = screen_output(reply, SYSTEM_PROMPT)
+def _screen(text: str) -> str:
+    result = screen_output(text, SYSTEM_PROMPT)
     if result.blocked:
         logger.warning("Output guardrail blocked a reply (%s)", result.reason)
         return result.safe_text
-    return reply
+    return text
 
 
 async def run_turn(
@@ -66,19 +86,22 @@ async def run_turn(
     chat_history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     chat_history.extend({"role": m.role, "content": m.content} for m in messages)
 
-    # Input guardrail: screen the customer's most recent message for known
-    # prompt-injection patterns. We can't un-send it to the model, so instead of a
-    # blanket refusal (which would also reject a legitimate message that happens to
-    # contain a trigger phrase), reinforce the system rules right before it — the
-    # output guardrail below is the actual backstop if this doesn't hold.
-    last_user_text = next((m.content for m in reversed(messages) if m.role == "user"), "")
-    if last_user_text and screen_input(last_user_text).flagged:
-        logger.warning("Input guardrail flagged a message as a likely prompt injection attempt")
-        chat_history.append({"role": "system", "content": GUARDRAIL_REMINDER})
-
     # A previously-issued mutating tool call only ever executes here, gated on an
-    # explicit human decision — the LLM's original request is never sufficient by itself.
+    # explicit human decision — the LLM's original request is never sufficient by
+    # itself. The token is verified so the arguments actually executed are provably
+    # the same ones the customer was shown in `summary`, not whatever a client
+    # (buggy state, or a direct API call) sends back.
     if pending_confirmation is not None:
+        if confirm and not verify_confirmation(
+            pending_confirmation.tool, pending_confirmation.arguments, pending_confirmation.token
+        ):
+            logger.warning("Confirmation token mismatch for tool %s — refusing to execute", pending_confirmation.tool)
+            return (
+                "Sorry, I couldn't verify that confirmation — it may be out of date. "
+                "Could you tell me again what you'd like to do?",
+                None,
+            )
+
         if confirm:
             outcome = await _run_tool_call(
                 session, pending_confirmation.tool, pending_confirmation.arguments, confirmed=True
@@ -103,13 +126,13 @@ async def run_turn(
                 }
             )
         reply = await llm.generate(chat_history)
-        return _finalize_reply(reply), None
+        return reply, None
 
     for _ in range(MAX_TOOL_ITERATIONS):
         decision = await llm.generate_with_tools(chat_history, get_ollama_tool_definitions())
 
         if decision["type"] == "message":
-            return _finalize_reply(decision["content"]), None
+            return decision["content"], None
 
         tool_calls = decision["tool_calls"]
 
@@ -128,8 +151,9 @@ async def run_turn(
                 # malformed/missing fields.
                 summary = _build_confirmation_summary(exc.tool_name, exc.validated_arguments)
                 reply = f"I'd like to {summary}. Should I go ahead?"
-                return _finalize_reply(reply), PendingConfirmation(
-                    tool=exc.tool_name, arguments=exc.validated_arguments, summary=summary
+                token = sign_confirmation(exc.tool_name, exc.validated_arguments)
+                return _screen(reply), PendingConfirmation(
+                    tool=exc.tool_name, arguments=exc.validated_arguments, summary=summary, token=token
                 )
             except (UnknownToolError, InvalidToolArgumentsError) as exc:
                 outcome = {"ok": False, "error": str(exc)}
@@ -138,6 +162,6 @@ async def run_turn(
             chat_history.append({"role": "tool", "content": str(outcome)})
 
     return (
-        "I'm having trouble completing this request right now. Let me escalate this to a human agent.",
+        _screen("I'm having trouble completing this request right now. Let me escalate this to a human agent."),
         None,
     )

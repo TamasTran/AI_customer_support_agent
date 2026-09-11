@@ -12,6 +12,10 @@ class PendingConfirmation(BaseModel):
     tool: str
     arguments: dict[str, Any]
     summary: str
+    # HMAC over (tool, arguments) — see app/security.py. Verified before execution so
+    # a client can't confirm a mutating action against arguments other than the exact
+    # ones the customer was shown.
+    token: str
 
 
 class ChatRequest(BaseModel):

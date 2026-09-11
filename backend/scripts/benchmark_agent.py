@@ -14,16 +14,16 @@ import asyncio
 import json
 import sys
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.agent.orchestrator import run_turn
 from app.config import settings
 from app.db import async_session
 from app.llm.ollama_provider import OllamaProvider
-from app.agent.orchestrator import run_turn
-from scripts.golden_dataset import load_cases
+from scripts.golden_dataset import CaseResult, load_cases
 
 
 def _aggregate_tokens_per_sec(call_log: list[dict]) -> float | None:
@@ -48,23 +48,23 @@ async def run_benchmark() -> dict:
     for i, case in enumerate(cases, start=1):
         print(f"[{i}/{len(cases)}] {case.id} ({case.category}) ...", flush=True)
         async with async_session() as session:
-            messages = await case.build(session)
-
             llm.call_log.clear()
             start = time.monotonic()
+            reply, pending = "", None
             try:
+                # Building the test case (which can query the DB for fixture rows
+                # matching a required order/customer state) is inside the same
+                # try/except as run_turn — a builder finding no matching state in a
+                # smaller or differently-seeded DB should fail just this one case,
+                # not crash the whole benchmark run.
+                messages = await case.build(session)
                 reply, pending = await run_turn(
                     llm=llm, session=session, messages=messages, pending_confirmation=None, confirm=None
                 )
-                error = None
-            except Exception as exc:  # noqa: BLE001 - a crash here is itself a benchmark failure
-                reply, pending, error = "", None, str(exc)
-            latency_s = time.monotonic() - start
-
-            if error:
-                result = type("R", (), {"passed": False, "detail": f"CRASHED: {error}"})()
-            else:
                 result = await case.check(reply, pending, session)
+            except Exception as exc:  # noqa: BLE001 - a crash here is itself a benchmark failure
+                result = CaseResult(False, f"CRASHED: {exc}")
+            latency_s = time.monotonic() - start
 
             tokens_per_sec = _aggregate_tokens_per_sec(llm.call_log)
             outcome = {

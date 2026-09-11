@@ -24,5 +24,10 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # Signs PendingConfirmation tokens (see app/security.py) so a mutating tool call
+    # can only execute with the exact arguments the customer was shown. Not used for
+    # anything else — override via APP_SECRET_KEY in production deployments.
+    app_secret_key: str = "dev-only-insecure-secret-change-me"
+
 
 settings = Settings()

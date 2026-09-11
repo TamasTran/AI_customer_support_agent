@@ -72,21 +72,53 @@ npm run dev
 
 Open http://localhost:5173.
 
+## 6. Running tests
+
+```bash
+cd backend
+uv run ruff check .
+uv run pytest -v
+```
+
+The test suite needs a real Postgres (same as `docker compose up -d postgres`,
+migrated) but never touches Ollama: guardrail/security tests are pure logic, and
+orchestrator tests drive a scripted `FakeLLMProvider` instead of a live model, so
+they're fast and deterministic. CI runs this on every push/PR — see
+`.github/workflows/ci.yml`.
+
+Separately, `scripts/benchmark_agent.py` runs the golden dataset against a real
+Ollama model end-to-end (see below) — that's a quality-over-time report, not a
+pass/fail CI gate, since it needs a live local model CI doesn't have.
+
+```bash
+uv run python scripts/benchmark_agent.py --out benchmark_report.json
+```
+
 ## Project layout
 
 ```
 backend/
   app/
-    llm/            # LLMProvider / EmbeddingProvider abstractions + OllamaProvider
-    models.py        # SQLAlchemy models (customers, orders, products, shipments, tickets, knowledge_chunks)
-    db.py            # async SQLAlchemy session
-    main.py           # FastAPI app: /api/health, /api/chat
-  alembic/            # DB migrations
+    llm/              # LLMProvider / EmbeddingProvider abstractions + OllamaProvider
+    guardrails/        # input (prompt-injection) + output (PII/system-prompt-leak) screening,
+                        # applied at the LLMProvider boundary via GuardrailedLLMProvider
+    tools/              # Pydantic tool schemas, implementations, and the execute_tool allowlist
+    agent/orchestrator.py  # the tool-calling loop + confirmation gate for mutating actions
+    security.py         # HMAC-signs the confirm handshake so a client can't execute a
+                         # mutating action against arguments other than what was proposed
+    models.py            # SQLAlchemy models (customers, orders, products, shipments, tickets, knowledge_chunks)
+    db.py                # async SQLAlchemy session
+    main.py               # FastAPI app: /api/health, /api/chat
+  alembic/                # DB migrations
   scripts/
     generate_synthetic_data.py
+    golden_dataset.py      # deterministic eval cases (normal/ambiguous/policy/injection/...)
+    benchmark_agent.py      # runs the golden dataset against a live Ollama model
+  tests/                    # pytest suite (no live Ollama needed — see "Running tests")
 frontend/
   src/App.tsx         # minimal chat UI
 docker-compose.yml    # PostgreSQL + pgvector only — Ollama runs on the host, not in Compose
+.github/workflows/ci.yml  # lint + test (backend), typecheck + build (frontend) on every push/PR
 ```
 
 ## Status
@@ -96,12 +128,16 @@ local model before adding the next layer (see project plan):
 
 - [x] Phase 1 — Ollama connectivity + chat proof of concept
 - [x] Phase 2 — Database schema + synthetic data
-- [ ] Phase 3 — Business tools (get_order, check_refund_eligibility, ...)
+- [x] Phase 3 — Business tools (get_order, check_refund_eligibility, ...)
 - [ ] Phase 4 — Local embeddings + pgvector
 - [ ] Phase 5 — RAG pipeline
-- [ ] Phase 6 — Agent orchestration
-- [ ] Phase 7 — Policy engine + permission checks
-- [ ] Phase 8+ — Human approval, guardrails, evaluation, observability, deployment
+- [x] Phase 6 — Agent orchestration
+- [x] Phase 7 — Policy engine + permission checks (confirmation gate enforced in execute_tool, signed confirmation tokens)
+- [ ] Phase 8 — Human approval tier (beyond customer confirmation)
+- [x] Phase 9 — Guardrails (input prompt-injection screening, output PII/system-prompt-leak screening)
+- [ ] Phase 10 — Full evaluation suite (golden dataset + benchmark script exist; no CI gate on it yet)
+- [ ] Phase 11 — Observability/metrics dashboard
+- [x] Phase 12 (partial) — CI (lint + test + typecheck + build on every push/PR); no Docker image / deployment pipeline yet
 
 ## A note on privacy vs. security
 

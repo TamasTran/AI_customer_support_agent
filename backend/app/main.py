@@ -6,9 +6,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.orchestrator import run_turn
+from app.agent.orchestrator import SYSTEM_PROMPT, run_turn
 from app.config import settings
 from app.db import engine, get_session
+from app.guardrails.llm_wrapper import GuardrailedLLMProvider
 from app.llm.exceptions import LLMModelNotFoundError, LLMUnavailableError
 from app.llm.ollama_provider import OllamaProvider
 from app.schemas import ChatRequest, ChatResponse, HealthResponse
@@ -25,10 +26,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-llm = OllamaProvider(
-    base_url=settings.ollama_base_url,
-    model=settings.ollama_chat_model,
-    timeout_seconds=settings.ollama_timeout_seconds,
+llm = GuardrailedLLMProvider(
+    OllamaProvider(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_chat_model,
+        timeout_seconds=settings.ollama_timeout_seconds,
+    ),
+    system_prompt=SYSTEM_PROMPT,
 )
 
 
