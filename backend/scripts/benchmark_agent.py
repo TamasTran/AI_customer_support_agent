@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.agent.orchestrator import run_turn
 from app.config import settings
 from app.db import async_session
-from app.llm.ollama_provider import OllamaProvider
+from app.llm.factory import get_llm_provider
 from scripts.golden_dataset import CaseResult, load_cases
 
 
@@ -35,11 +35,11 @@ def _aggregate_tokens_per_sec(call_log: list[dict]) -> float | None:
 
 
 async def run_benchmark() -> dict:
-    llm = OllamaProvider(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_chat_model,
-        timeout_seconds=settings.ollama_timeout_seconds,
-    )
+    # get_llm_provider() always returns a guardrailed provider — constructing a bare
+    # OllamaProvider here would silently benchmark the model with no input/output
+    # screening at all, which previously made the prompt_injection/unauthorized_access
+    # golden-dataset cases misleading (they'd pass or fail on the raw model alone).
+    llm = get_llm_provider()
     await llm.health_check()
 
     cases = await load_cases()

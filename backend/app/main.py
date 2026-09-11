@@ -6,12 +6,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.orchestrator import SYSTEM_PROMPT, run_turn
-from app.config import settings
+from app.agent.orchestrator import run_turn
+from app.config import DEFAULT_APP_SECRET_KEY, settings
 from app.db import engine, get_session
-from app.guardrails.llm_wrapper import GuardrailedLLMProvider
 from app.llm.exceptions import LLMModelNotFoundError, LLMUnavailableError
-from app.llm.ollama_provider import OllamaProvider
+from app.llm.factory import get_llm_provider
 from app.schemas import ChatRequest, ChatResponse, HealthResponse
 
 logging.basicConfig(level=settings.log_level)
@@ -26,14 +25,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-llm = GuardrailedLLMProvider(
-    OllamaProvider(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_chat_model,
-        timeout_seconds=settings.ollama_timeout_seconds,
-    ),
-    system_prompt=SYSTEM_PROMPT,
-)
+llm = get_llm_provider()
 
 
 @app.exception_handler(LLMUnavailableError)
@@ -50,6 +42,22 @@ async def llm_model_not_found_handler(request, exc: LLMModelNotFoundError):
         status_code=503,
         content={"error": "LLM_MODEL_NOT_FOUND", "message": str(exc)},
     )
+
+
+@app.on_event("startup")
+async def check_secret_key_is_not_default() -> None:
+    """Refuse to boot with the public, committed-to-the-repo default APP_SECRET_KEY
+    outside development — otherwise anyone who reads the source can forge an HMAC for
+    PendingConfirmation.token and get request_refund/cancel_order to execute with
+    arbitrary arguments, with no warning that the signing is not actually protecting
+    anything. Mirrors the hard failure OllamaProvider already does for an unset model."""
+    if settings.app_secret_key == DEFAULT_APP_SECRET_KEY and settings.app_env != "development":
+        raise RuntimeError(
+            "APP_SECRET_KEY is still set to the default, publicly-known value "
+            f"('{DEFAULT_APP_SECRET_KEY}') while APP_ENV='{settings.app_env}'. "
+            "Set a real random APP_SECRET_KEY before running outside development — "
+            "otherwise confirmation tokens for refunds/cancellations can be forged."
+        )
 
 
 @app.on_event("startup")

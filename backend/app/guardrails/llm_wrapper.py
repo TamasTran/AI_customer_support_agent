@@ -21,6 +21,13 @@ class GuardrailedLLMProvider(LLMProvider):
         self._inner = inner
         self._system_prompt = system_prompt
 
+    @property
+    def call_log(self) -> list[dict]:
+        # Pass through OllamaProvider's per-call timing log (used by
+        # scripts/benchmark_agent.py) so wrapping doesn't hide it from callers that
+        # want raw latency/token metrics.
+        return getattr(self._inner, "call_log", [])
+
     def _prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         last_user_text = next(
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""

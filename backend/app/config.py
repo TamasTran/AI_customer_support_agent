@@ -4,6 +4,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
+# Exposed so main.py's startup check can refuse to boot with this value outside
+# development, rather than silently letting confirmation tokens become forgeable.
+DEFAULT_APP_SECRET_KEY = "dev-only-insecure-secret-change-me"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
@@ -27,7 +31,7 @@ class Settings(BaseSettings):
     # Signs PendingConfirmation tokens (see app/security.py) so a mutating tool call
     # can only execute with the exact arguments the customer was shown. Not used for
     # anything else — override via APP_SECRET_KEY in production deployments.
-    app_secret_key: str = "dev-only-insecure-secret-change-me"
+    app_secret_key: str = DEFAULT_APP_SECRET_KEY
 
 
 settings = Settings()
