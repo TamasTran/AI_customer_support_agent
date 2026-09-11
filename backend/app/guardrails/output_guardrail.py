@@ -36,16 +36,14 @@ SYSTEM_PROMPT_LEAK_MESSAGE = (
 # length of short, generic lines (e.g. "Keep responses concise and helpful." is ~34
 # normalized chars) that a model could plausibly paraphrase into on its own without
 # having leaked anything — every other substantive rule line is well over this length.
+#
+# A previous version also flagged two-or-more SHORT lines matching together, on the
+# theory that coincidental paraphrase of two different generic phrases is unlikely.
+# In practice this false-positived on ordinary replies that legitimately touch two
+# generic topics (e.g. "Rules you must follow: keep your receipt... I try to keep
+# responses concise and helpful."), which is worse than the gap it closed — missing a
+# single short rule leaked in isolation with no other context is the safer trade-off.
 _MIN_LEAK_LINE_LENGTH = 45
-
-# A single short line matching (see _MIN_LEAK_LINE_LENGTH) is too weak a signal on its
-# own — could be coincidental paraphrase. But two or more lines matching, even short
-# ones, is not something a model plausibly free-associates into; it's evidence of an
-# actual dump. This catches e.g. a verbatim reproduction of "Keep responses concise
-# and helpful." when it appears alongside another leaked rule, without reintroducing
-# the single-line false positive _MIN_LEAK_LINE_LENGTH exists to avoid.
-_MIN_MULTI_LINE_MATCH_LENGTH = 15
-_MULTI_LINE_MATCH_COUNT = 2
 
 
 @dataclass(frozen=True)
@@ -62,17 +60,9 @@ def _normalize_line(line: str) -> str:
 
 def _contains_system_prompt_leak(text: str, system_prompt: str) -> bool:
     normalized_reply = _normalize_line(text)
-    short_line_matches = 0
     for line in system_prompt.splitlines():
         normalized_line = _normalize_line(line)
-        if len(normalized_line) < _MIN_MULTI_LINE_MATCH_LENGTH:
-            continue
-        if normalized_line not in normalized_reply:
-            continue
-        if len(normalized_line) >= _MIN_LEAK_LINE_LENGTH:
-            return True
-        short_line_matches += 1
-        if short_line_matches >= _MULTI_LINE_MATCH_COUNT:
+        if len(normalized_line) >= _MIN_LEAK_LINE_LENGTH and normalized_line in normalized_reply:
             return True
     return False
 

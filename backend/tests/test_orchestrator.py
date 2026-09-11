@@ -1,12 +1,13 @@
 """Orchestrator tests driven by a scripted fake LLM — no live Ollama required.
 Tool calls still hit the real (transaction-isolated) DB via db_session."""
-import time
 from typing import Any
+from unittest.mock import patch
 
 from app.agent.orchestrator import SYSTEM_PROMPT, run_turn
 from app.guardrails.llm_wrapper import GuardrailedLLMProvider
 from app.llm.base import LLMProvider
-from app.schemas import ChatMessage
+from app.schemas import ChatMessage, PendingConfirmation
+from app.security import CONFIRMATION_TTL_SECONDS, sign_confirmation
 
 
 class FakeLLMProvider(LLMProvider):
@@ -55,21 +56,16 @@ async def test_confirmation_required_tool_returns_pending_confirmation(db_sessio
     assert pending is not None
     assert pending.tool == "cancel_order"
     assert pending.arguments["order_id"] == pending_order.id
-    assert pending.token  # a real HMAC token was issued
+    assert pending.token  # a real token was issued
 
 
 async def test_confirming_with_valid_token_executes_the_action(db_session, pending_order):
-    from app.schemas import PendingConfirmation
-    from app.security import sign_confirmation
-
-    issued_at = time.time()
-    token = sign_confirmation("cancel_order", {"order_id": pending_order.id, "reason": "changed mind"}, issued_at)
+    token = sign_confirmation("cancel_order", {"order_id": pending_order.id, "reason": "changed mind"})
     pending = PendingConfirmation(
         tool="cancel_order",
         arguments={"order_id": pending_order.id, "reason": "changed mind"},
         summary="cancel order",
         token=token,
-        issued_at=issued_at,
     )
     llm = FakeLLMProvider([{"content": "Your order has been cancelled."}])
 
@@ -87,19 +83,14 @@ async def test_confirming_with_valid_token_executes_the_action(db_session, pendi
 
 
 async def test_confirming_with_tampered_token_refuses_without_executing(db_session, pending_order):
-    from app.schemas import PendingConfirmation
-    from app.security import sign_confirmation
-
     # Token signed for a different order than the one in `arguments` — simulates a
     # tampered or stale client-side confirmation payload.
-    issued_at = time.time()
-    token = sign_confirmation("cancel_order", {"order_id": "ORD-SOMETHING-ELSE", "reason": "x"}, issued_at)
+    token = sign_confirmation("cancel_order", {"order_id": "ORD-SOMETHING-ELSE", "reason": "x"})
     pending = PendingConfirmation(
         tool="cancel_order",
         arguments={"order_id": pending_order.id, "reason": "changed mind"},
         summary="cancel order",
         token=token,
-        issued_at=issued_at,
     )
     llm = FakeLLMProvider([])  # must not even be called
 
@@ -147,29 +138,24 @@ async def test_multiple_tool_calls_in_one_turn_are_all_executed(db_session, cust
 
 
 async def test_confirming_with_expired_token_refuses_without_executing(db_session, pending_order):
-    from app.schemas import PendingConfirmation
-    from app.security import CONFIRMATION_TTL_SECONDS, sign_confirmation
-
-    stale_issued_at = time.time() - CONFIRMATION_TTL_SECONDS - 1
-    token = sign_confirmation(
-        "cancel_order", {"order_id": pending_order.id, "reason": "changed mind"}, stale_issued_at
-    )
+    with patch("app.security.time.time", return_value=1_000_000.0):
+        token = sign_confirmation("cancel_order", {"order_id": pending_order.id, "reason": "changed mind"})
     pending = PendingConfirmation(
         tool="cancel_order",
         arguments={"order_id": pending_order.id, "reason": "changed mind"},
         summary="cancel order",
         token=token,
-        issued_at=stale_issued_at,
     )
     llm = FakeLLMProvider([])  # must not even be called
 
-    reply, next_pending = await run_turn(
-        llm=llm,
-        session=db_session,
-        messages=[ChatMessage(role="user", content="yes")],
-        pending_confirmation=pending,
-        confirm=True,
-    )
+    with patch("app.security.time.time", return_value=1_000_000.0 + CONFIRMATION_TTL_SECONDS + 1):
+        reply, next_pending = await run_turn(
+            llm=llm,
+            session=db_session,
+            messages=[ChatMessage(role="user", content="yes")],
+            pending_confirmation=pending,
+            confirm=True,
+        )
 
     assert next_pending is None
     assert "couldn't verify" in reply.lower()
@@ -190,17 +176,12 @@ async def test_confirming_with_expired_token_refuses_without_executing(db_sessio
 
 
 async def test_wrapped_llm_screens_customer_message_on_confirm_turn(db_session, pending_order):
-    from app.schemas import PendingConfirmation
-    from app.security import sign_confirmation
-
-    issued_at = time.time()
-    token = sign_confirmation("cancel_order", {"order_id": pending_order.id, "reason": "changed mind"}, issued_at)
+    token = sign_confirmation("cancel_order", {"order_id": pending_order.id, "reason": "changed mind"})
     pending = PendingConfirmation(
         tool="cancel_order",
         arguments={"order_id": pending_order.id, "reason": "changed mind"},
         summary="cancel order",
         token=token,
-        issued_at=issued_at,
     )
     fake = FakeLLMProvider([{"content": "Your order has been cancelled."}])
     llm = GuardrailedLLMProvider(fake, system_prompt=SYSTEM_PROMPT)

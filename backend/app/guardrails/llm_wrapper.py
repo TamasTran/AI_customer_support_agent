@@ -25,8 +25,11 @@ class GuardrailedLLMProvider(LLMProvider):
     def call_log(self) -> list[dict]:
         # Pass through OllamaProvider's per-call timing log (used by
         # scripts/benchmark_agent.py) so wrapping doesn't hide it from callers that
-        # want raw latency/token metrics.
-        return getattr(self._inner, "call_log", [])
+        # want raw latency/token metrics. Deliberately no getattr(..., []) fallback —
+        # a wrapped provider without call_log should raise AttributeError here, not
+        # silently hand back a fresh, always-empty list that makes a caller's
+        # `.clear()` a no-op and its metrics quietly wrong.
+        return self._inner.call_log
 
     def _prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         last_user_text = next(

@@ -1,5 +1,4 @@
 import logging
-import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,10 +93,7 @@ async def run_turn(
     # (buggy state, or a direct API call) sends back.
     if pending_confirmation is not None:
         if confirm and not verify_confirmation(
-            pending_confirmation.tool,
-            pending_confirmation.arguments,
-            pending_confirmation.token,
-            pending_confirmation.issued_at,
+            pending_confirmation.tool, pending_confirmation.arguments, pending_confirmation.token
         ):
             logger.warning("Confirmation token mismatch for tool %s — refusing to execute", pending_confirmation.tool)
             return (
@@ -161,14 +157,9 @@ async def run_turn(
                 # malformed/missing fields.
                 summary = _build_confirmation_summary(exc.tool_name, exc.validated_arguments)
                 reply = f"I'd like to {summary}. Should I go ahead?"
-                issued_at = time.time()
-                token = sign_confirmation(exc.tool_name, exc.validated_arguments, issued_at)
+                token = sign_confirmation(exc.tool_name, exc.validated_arguments)
                 return _screen(reply), PendingConfirmation(
-                    tool=exc.tool_name,
-                    arguments=exc.validated_arguments,
-                    summary=summary,
-                    token=token,
-                    issued_at=issued_at,
+                    tool=exc.tool_name, arguments=exc.validated_arguments, summary=summary, token=token
                 )
             except (UnknownToolError, InvalidToolArgumentsError) as exc:
                 outcome = {"ok": False, "error": str(exc)}

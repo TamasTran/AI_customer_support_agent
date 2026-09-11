@@ -4,10 +4,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-# Exposed so main.py's startup check can refuse to boot with this value outside
-# development, rather than silently letting confirmation tokens become forgeable.
-DEFAULT_APP_SECRET_KEY = "dev-only-insecure-secret-change-me"
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
@@ -29,9 +25,20 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # Signs PendingConfirmation tokens (see app/security.py) so a mutating tool call
-    # can only execute with the exact arguments the customer was shown. Not used for
-    # anything else — override via APP_SECRET_KEY in production deployments.
-    app_secret_key: str = DEFAULT_APP_SECRET_KEY
+    # can only execute with the exact arguments the customer was shown. No usable
+    # default on purpose — a previous version defaulted to a fixed, publicly-known
+    # string and only failed if a self-reported APP_ENV said non-development, which
+    # is itself unset-by-default and easy to leave unset in a real deployment. Empty
+    # is mandatory everywhere, matching how OLLAMA_CHAT_MODEL already hard-fails on
+    # empty regardless of environment (see OllamaProvider.__init__).
+    app_secret_key: str = ""
 
 
 settings = Settings()
+
+if not settings.app_secret_key:
+    raise ValueError(
+        "APP_SECRET_KEY must be configured (see .env.example) — it signs the "
+        "confirmation tokens that gate refunds/cancellations. Set it to a random "
+        "value; there is no usable default."
+    )

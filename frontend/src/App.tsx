@@ -6,7 +6,6 @@ type PendingConfirmation = {
   arguments: Record<string, unknown>;
   summary: string;
   token: string;
-  issued_at: number;
 };
 
 export default function App() {

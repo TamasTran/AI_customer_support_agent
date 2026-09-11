@@ -12,12 +12,11 @@ class PendingConfirmation(BaseModel):
     tool: str
     arguments: dict[str, Any]
     summary: str
-    # HMAC over (tool, arguments, issued_at) — see app/security.py. Verified before
-    # execution so a client can't confirm a mutating action against arguments other
-    # than the exact ones the customer was shown, and can't replay an old confirmation
-    # past CONFIRMATION_TTL_SECONDS.
+    # Opaque token (issue time + HMAC, both embedded — see app/security.py) verified
+    # before execution so a client can't confirm a mutating action against arguments
+    # other than the exact ones the customer was shown, and can't replay an old
+    # confirmation past CONFIRMATION_TTL_SECONDS.
     token: str
-    issued_at: float
 
 
 class ChatRequest(BaseModel):

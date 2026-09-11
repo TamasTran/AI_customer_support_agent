@@ -38,9 +38,19 @@ target-version = "py311"
 extend-exclude = ["alembic"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "TID"]
 # E501: line length isn't worth failing CI over.
 # UP042: str+Enum (not enum.StrEnum) is deliberate — StrEnum has different str()/repr()
 # semantics that would need auditing everywhere these enums are serialized to JSON.
 # B008: Depends(...) in a function default is FastAPI's standard DI idiom, not a bug.
 ignore = ["E501", "UP042", "B008"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# A bare OllamaProvider has no input/output guardrails at all. This was already the
+# cause of a real bug once (scripts/benchmark_agent.py constructed one directly,
+# silently running with zero screening) — enforce the factory at lint time instead of
+# relying on every future call site remembering a docstring.
+"app.llm.ollama_provider.OllamaProvider" = { msg = "Construct via app.llm.factory.get_llm_provider() instead — a bare OllamaProvider has no guardrails." }
+
+[tool.ruff.lint.per-file-ignores]
+"app/llm/factory.py" = ["TID251"]
