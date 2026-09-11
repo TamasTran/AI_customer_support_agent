@@ -28,6 +28,7 @@ from app.tools.schemas import (
     GetTicketInput,
     ListCustomerOrdersInput,
     RequestRefundInput,
+    SearchKnowledgeBaseInput,
 )
 
 REFUND_WINDOW_DAYS = 30
@@ -119,6 +120,33 @@ async def get_shipping_status(session: AsyncSession, args: GetShippingStatusInpu
         "estimated_delivery": shipment.estimated_delivery.isoformat(),
         "shipped_at": shipment.shipped_at.isoformat() if shipment.shipped_at else None,
         "delivered_at": shipment.delivered_at.isoformat() if shipment.delivered_at else None,
+    }
+
+
+async def search_knowledge_base(session: AsyncSession, args: SearchKnowledgeBaseInput) -> dict:
+    """`session` is unused — the knowledge base lives in its own LlamaIndex-managed
+    pgvector table (app/rag/store.py), queried through its own connection rather than
+    the business-data session, but the parameter is kept for a consistent handler
+    signature across the tool registry. Import is local to keep LlamaIndex (a heavy,
+    multi-package import) out of every process that imports this module but never
+    calls this one tool — e.g. the synthetic-data generator, most tests."""
+    from app.rag.retriever import retrieve_knowledge
+
+    results = await retrieve_knowledge(args.query)
+    if not results:
+        raise ToolError("No relevant policy information found for that question.")
+    return {
+        "results": [
+            {
+                "document_id": r.document_id,
+                "title": r.title,
+                "version": r.version,
+                "effective_date": r.effective_date,
+                "department": r.department,
+                "content": r.content,
+            }
+            for r in results
+        ]
     }
 
 

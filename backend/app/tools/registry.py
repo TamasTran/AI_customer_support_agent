@@ -19,6 +19,7 @@ from app.tools.schemas import (
     GetTicketInput,
     ListCustomerOrdersInput,
     RequestRefundInput,
+    SearchKnowledgeBaseInput,
 )
 
 
@@ -72,6 +73,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "Look up shipment/tracking status for an order.",
             GetShippingStatusInput,
             impl.get_shipping_status,
+            mutates_state=False,
+            requires_confirmation=False,
+        ),
+        ToolSpec(
+            "search_knowledge_base",
+            "Search company policy documents (refunds, shipping, cancellations, "
+            "privacy) for an answer to a policy question. Only returns currently "
+            "active policy versions.",
+            SearchKnowledgeBaseInput,
+            impl.search_knowledge_base,
             mutates_state=False,
             requires_confirmation=False,
         ),

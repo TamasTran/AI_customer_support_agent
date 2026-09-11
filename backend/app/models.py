@@ -1,11 +1,8 @@
 import enum
 from datetime import date, datetime
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import Date, DateTime, Enum, ForeignKey, Numeric, Sequence, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
-from app.config import settings
 
 
 class Base(DeclarativeBase):
@@ -48,12 +45,6 @@ class TicketPriority(str, enum.Enum):
     NORMAL = "normal"
     HIGH = "high"
     URGENT = "urgent"
-
-
-class DocumentStatus(str, enum.Enum):
-    ACTIVE = "active"
-    DRAFT = "draft"
-    DEPRECATED = "deprecated"
 
 
 class Customer(Base):
@@ -138,24 +129,3 @@ class Ticket(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     customer: Mapped["Customer"] = relationship(back_populates="tickets")
-
-
-class KnowledgeChunk(Base):
-    """RAG chunk, denormalized with its parent document's policy metadata.
-
-    Denormalized (rather than a join to a separate documents table) so retrieval
-    filtering on status/version stays a single indexed WHERE clause per query.
-    """
-
-    __tablename__ = "knowledge_chunks"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    document_id: Mapped[str] = mapped_column(String(100), index=True)
-    title: Mapped[str] = mapped_column(String(300))
-    version: Mapped[str] = mapped_column(String(20))
-    effective_date: Mapped[date] = mapped_column(Date)
-    status: Mapped[DocumentStatus] = mapped_column(Enum(DocumentStatus, name="document_status"))
-    department: Mapped[str] = mapped_column(String(100))
-    chunk_index: Mapped[int]
-    content: Mapped[str] = mapped_column(Text)
-    embedding: Mapped[list[float]] = mapped_column(Vector(settings.embedding_dimension))

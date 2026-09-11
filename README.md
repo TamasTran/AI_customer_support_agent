@@ -1,12 +1,13 @@
 # AI Customer Support Agent (Local-First, Ollama)
 
 A customer support agent that runs entirely on local infrastructure: Ollama for
-chat/reasoning and embeddings, PostgreSQL + pgvector for business data and RAG.
-No cloud LLM API key is required.
+chat/reasoning and embeddings, PostgreSQL + pgvector for business data and RAG
+(via LlamaIndex). No cloud LLM API key is required.
 
 ```
 React  ->  FastAPI  ->  Agent Orchestrator  ->  Ollama (chat + embeddings)
-                                             ->  PostgreSQL + pgvector
+                                             ->  PostgreSQL (business data)
+                                             ->  LlamaIndex -> pgvector (knowledge base)
 ```
 
 ## Prerequisites
@@ -62,6 +63,23 @@ If Ollama is unreachable or the configured model isn't pulled, this endpoint
 reports the specific error rather than a generic failure — the app never
 silently falls back to a different model or a fake response.
 
+### Knowledge base (RAG)
+
+```bash
+uv run python scripts/ingest_knowledge.py   # indexes backend/knowledge/*.md into pgvector
+```
+
+Policy documents live as Markdown files with a YAML frontmatter metadata block
+(`document_id`, `title`, `version`, `effective_date`, `status`, `department`) —
+see `backend/knowledge/refund-policy.md`. Ingestion (via
+[LlamaIndex](https://docs.llamaindex.ai/), chunked with `SentenceSplitter` and
+embedded through Ollama) is idempotent per `document_id:version`, so re-running
+it after editing a doc just replaces that doc's chunks. The agent's
+`search_knowledge_base` tool only ever retrieves `status: active` chunks, so an
+older `deprecated` version of a policy can never outrank the current one —
+see `backend/knowledge/refund-policy-v3-deprecated.md` for a worked example
+kept in the repo specifically to exercise that filter.
+
 ## 5. Frontend setup
 
 ```bash
@@ -102,16 +120,22 @@ backend/
     llm/              # LLMProvider / EmbeddingProvider abstractions + OllamaProvider
     guardrails/        # input (prompt-injection) + output (PII/system-prompt-leak) screening,
                         # applied at the LLMProvider boundary via GuardrailedLLMProvider
-    tools/              # Pydantic tool schemas, implementations, and the execute_tool allowlist
+    rag/                 # LlamaIndex wiring: llama_settings (Ollama LLM/embed model),
+                          # store (PGVectorStore), ingest, retriever (status="active" filter)
+    tools/              # Pydantic tool schemas, implementations (incl. search_knowledge_base),
+                        # and the execute_tool allowlist
     agent/orchestrator.py  # the tool-calling loop + confirmation gate for mutating actions
     security.py         # HMAC-signs the confirm handshake so a client can't execute a
                          # mutating action against arguments other than what was proposed
-    models.py            # SQLAlchemy models (customers, orders, products, shipments, tickets, knowledge_chunks)
+    models.py            # SQLAlchemy models (customers, orders, products, shipments, tickets)
     db.py                # async SQLAlchemy session
     main.py               # FastAPI app: /api/health, /api/chat
-  alembic/                # DB migrations
+  alembic/                # DB migrations (business tables only — the knowledge base table
+                           # is created by LlamaIndex's PGVectorStore on first ingest, not here)
+  knowledge/                # policy source docs (Markdown + YAML frontmatter metadata)
   scripts/
     generate_synthetic_data.py
+    ingest_knowledge.py     # indexes backend/knowledge/*.md
     golden_dataset.py      # deterministic eval cases (normal/ambiguous/policy/injection/...)
     benchmark_agent.py      # runs the golden dataset against a live Ollama model
   tests/                    # pytest suite (no live Ollama needed — see "Running tests")
@@ -129,8 +153,8 @@ local model before adding the next layer (see project plan):
 - [x] Phase 1 — Ollama connectivity + chat proof of concept
 - [x] Phase 2 — Database schema + synthetic data
 - [x] Phase 3 — Business tools (get_order, check_refund_eligibility, ...)
-- [ ] Phase 4 — Local embeddings + pgvector
-- [ ] Phase 5 — RAG pipeline
+- [x] Phase 4 — Local embeddings + pgvector (via LlamaIndex + Ollama embeddings)
+- [x] Phase 5 — RAG pipeline (LlamaIndex ingest/retrieve, status="active" filtering, search_knowledge_base tool)
 - [x] Phase 6 — Agent orchestration
 - [x] Phase 7 — Policy engine + permission checks (confirmation gate enforced in execute_tool, signed confirmation tokens)
 - [ ] Phase 8 — Human approval tier (beyond customer confirmation)

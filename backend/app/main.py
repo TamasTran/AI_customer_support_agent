@@ -47,26 +47,28 @@ async def llm_model_not_found_handler(request, exc: LLMModelNotFoundError):
 @app.on_event("startup")
 async def check_embedding_dimension_matches_db() -> None:
     """Fail fast and clearly if EMBEDDING_DIMENSION drifts from the DB column's actual
-    dimension (e.g. the embedding model was changed without regenerating the
-    knowledge_chunks migration), rather than surfacing a cryptic pgvector error
-    the first time something tries to insert a real embedding."""
+    dimension (e.g. the embedding model was changed after the knowledge base was
+    already ingested), rather than surfacing a cryptic pgvector error the first time
+    a query embedding is compared against it. The table itself (data_knowledge_base)
+    is created by LlamaIndex's PGVectorStore on first ingest (see app/rag/store.py),
+    not by an Alembic migration, so it may not exist yet on a fresh DB."""
     async with engine.connect() as conn:
         result = await conn.execute(
             text(
                 "SELECT atttypmod FROM pg_attribute "
-                "WHERE attrelid = 'knowledge_chunks'::regclass AND attname = 'embedding'"
+                "WHERE attrelid = to_regclass('public.data_knowledge_base') AND attname = 'embedding'"
             )
         )
         row = result.first()
     if row is None:
-        return  # table not migrated yet; nothing to check
+        return  # not ingested yet; nothing to check
     db_dimension = row[0]
     if db_dimension != settings.embedding_dimension:
         raise RuntimeError(
             f"EMBEDDING_DIMENSION is configured as {settings.embedding_dimension}, but the "
-            f"knowledge_chunks.embedding column in the database is {db_dimension}-dimensional. "
-            f"Run scripts/check_embedding_dimension.py, update .env, and regenerate the "
-            f"knowledge_chunks migration to match before starting the app."
+            f"data_knowledge_base.embedding column in the database is {db_dimension}-dimensional. "
+            f"Run scripts/check_embedding_dimension.py, update .env, then re-run "
+            f"scripts/ingest_knowledge.py against a fresh database to match."
         )
 
 

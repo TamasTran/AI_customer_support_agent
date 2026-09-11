@@ -22,6 +22,10 @@ class GetShippingStatusInput(BaseModel):
     order_id: str
 
 
+class SearchKnowledgeBaseInput(BaseModel):
+    query: str = Field(description="A natural-language question about company policy (refunds, shipping, cancellations, privacy, etc).")
+
+
 class CheckRefundEligibilityInput(BaseModel):
     order_id: str
 
