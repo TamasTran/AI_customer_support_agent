@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -35,3 +36,24 @@ class HealthResponse(BaseModel):
     ollama: str
     chat_model: str
     embedding_model: str
+
+
+class PendingApprovalResponse(BaseModel):
+    id: int
+    tool: str
+    arguments: dict[str, Any]
+    reason: str
+    status: str
+    created_at: datetime
+    decided_at: datetime | None
+    decided_by: str | None
+    decision_note: str | None
+    result: dict[str, Any] | None
+
+    model_config = {"from_attributes": True}
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approve: bool
+    decided_by: str
+    note: str = ""

@@ -31,6 +31,12 @@ class ToolSpec:
     handler: Callable[[AsyncSession, BaseModel], Awaitable[dict]]
     mutates_state: bool
     requires_confirmation: bool
+    # Distinct from requires_confirmation: confirmation is the CUSTOMER agreeing to
+    # the action; this is a STAFF member signing off on it, for actions above some
+    # risk threshold even after the customer has already agreed. Given (session,
+    # validated_args), returns (needs_approval, reason). None means this tool never
+    # needs staff approval.
+    human_approval_check: Callable[[AsyncSession, BaseModel], Awaitable[tuple[bool, str]]] | None = None
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
@@ -110,6 +116,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             impl.request_refund,
             mutates_state=True,
             requires_confirmation=True,
+            human_approval_check=impl.refund_requires_human_approval,
         ),
         ToolSpec(
             "cancel_order",
@@ -192,14 +199,37 @@ class ConfirmationRequiredError(Exception):
         super().__init__(f"Tool '{tool_name}' requires explicit confirmation before executing.")
 
 
+class HumanApprovalRequiredError(Exception):
+    """Raised when a tool's human_approval_check says this action needs staff
+    sign-off, even though the customer has already confirmed it. Distinct tier from
+    ConfirmationRequiredError: that one is the customer agreeing to the action, this
+    one is a human employee reviewing it — e.g. a refund large enough that a customer
+    saying "yes" isn't sufficient authorization on its own. Carries the
+    schema-validated arguments so the caller can queue a real approval record built
+    from clean data.
+    """
+
+    def __init__(self, tool_name: str, validated_arguments: dict, reason: str):
+        self.tool_name = tool_name
+        self.validated_arguments = validated_arguments
+        self.reason = reason
+        super().__init__(f"Tool '{tool_name}' requires human approval before executing: {reason}")
+
+
 async def execute_tool(
-    session: AsyncSession, name: str, raw_arguments: dict, confirmed: bool = False
+    session: AsyncSession,
+    name: str,
+    raw_arguments: dict,
+    confirmed: bool = False,
+    human_approved: bool = False,
 ) -> dict:
     """The allowlist gate: reject anything not in TOOL_REGISTRY, reject arguments that
     don't validate against that tool's schema, never execute arbitrary text as a
-    tool call, and never run a tool marked requires_confirmation unless the caller
-    explicitly passes confirmed=True. This is the boundary between "LLM requested an
-    action" and "action ran" — the one place that boundary is enforced, not just in
+    tool call, never run a tool marked requires_confirmation unless the caller
+    explicitly passes confirmed=True, and never run a tool whose human_approval_check
+    says it needs staff sign-off unless the caller explicitly passes
+    human_approved=True. This is the boundary between "LLM requested an action" and
+    "action ran" — the one place every one of these checks is enforced, not just in
     whichever caller happens to invoke it."""
     spec = TOOL_REGISTRY.get(name)
     if spec is None:
@@ -212,6 +242,11 @@ async def execute_tool(
 
     if spec.requires_confirmation and not confirmed:
         raise ConfirmationRequiredError(name, args.model_dump())
+
+    if spec.human_approval_check is not None and not human_approved:
+        needs_approval, reason = await spec.human_approval_check(session, args)
+        if needs_approval:
+            raise HumanApprovalRequiredError(name, args.model_dump(), reason)
 
     try:
         result = await spec.handler(session, args)

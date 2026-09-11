@@ -1,9 +1,10 @@
 import logging
+from datetime import datetime
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.orchestrator import run_turn
@@ -11,8 +12,16 @@ from app.config import settings
 from app.db import engine, get_session
 from app.llm.exceptions import LLMModelNotFoundError, LLMUnavailableError
 from app.llm.factory import get_llm_provider
-from app.schemas import ChatRequest, ChatResponse, HealthResponse
-from app.tracing import TurnTrace, current_trace, save_trace
+from app.models import ApprovalStatus, PendingApproval
+from app.schemas import (
+    ApprovalDecisionRequest,
+    ChatRequest,
+    ChatResponse,
+    HealthResponse,
+    PendingApprovalResponse,
+)
+from app.tools.registry import execute_tool
+from app.tracing import TurnTrace, current_trace, record_event, save_trace
 
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
@@ -128,3 +137,67 @@ async def chat(request: ChatRequest, session: AsyncSession = Depends(get_session
             # Tracing must never break the actual chat response.
             logger.exception("Failed to persist agent trace")
     return ChatResponse(reply=reply, pending_confirmation=pending_confirmation)
+
+
+# --- Human approval queue (Phase 8) ----------------------------------------------
+# A separate tier from customer confirmation: some mutating actions (currently just
+# request_refund above HUMAN_APPROVAL_REFUND_THRESHOLD — see
+# app/tools/implementations.py) need a staff member's sign-off even after the
+# customer has already agreed. These endpoints are how that staff member reviews and
+# decides — see scripts/review_approvals.py for a local CLI alternative.
+#
+# SECURITY NOTE: there is no staff authentication system in this project yet (a
+# known, documented gap — see the README's privacy/security note), so these
+# endpoints are unauthenticated. Anyone who can reach the API can approve or reject
+# a queued action. Do not deploy this beyond local development without adding real
+# staff auth in front of these two routes.
+
+
+@app.get("/api/approvals", response_model=list[PendingApprovalResponse])
+async def list_approvals(status: str = "pending", session: AsyncSession = Depends(get_session)):
+    try:
+        status_filter = ApprovalStatus(status)
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail=f"status must be one of {[s.value for s in ApprovalStatus]}"
+        ) from None
+    result = await session.execute(
+        select(PendingApproval)
+        .where(PendingApproval.status == status_filter)
+        .order_by(PendingApproval.created_at.asc())
+    )
+    return result.scalars().all()
+
+
+@app.post("/api/approvals/{approval_id}/decide", response_model=PendingApprovalResponse)
+async def decide_approval(
+    approval_id: int, request: ApprovalDecisionRequest, session: AsyncSession = Depends(get_session)
+):
+    approval = await session.get(PendingApproval, approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail=f"No pending approval with id {approval_id}")
+    if approval.status != ApprovalStatus.PENDING:
+        raise HTTPException(
+            status_code=409, detail=f"Approval {approval_id} was already {approval.status.value}"
+        )
+
+    approval.decided_at = datetime.utcnow()
+    approval.decided_by = request.decided_by
+    approval.decision_note = request.note
+
+    if not request.approve:
+        approval.status = ApprovalStatus.REJECTED
+        record_event("human_approval_rejected", approval_id=approval_id, decided_by=request.decided_by)
+    else:
+        outcome = await execute_tool(
+            session, approval.tool, approval.arguments, confirmed=True, human_approved=True
+        )
+        approval.status = ApprovalStatus.APPROVED
+        approval.result = outcome
+        record_event(
+            "human_approval_approved", approval_id=approval_id, decided_by=request.decided_by, ok=outcome.get("ok")
+        )
+
+    await session.commit()
+    await session.refresh(approval)
+    return approval

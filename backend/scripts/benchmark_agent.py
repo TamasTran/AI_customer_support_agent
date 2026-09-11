@@ -8,6 +8,11 @@ tokens/sec measured from Ollama's own per-call timing data.
 Usage:
     uv run python scripts/benchmark_agent.py
     uv run python scripts/benchmark_agent.py --out report.json
+    uv run python scripts/benchmark_agent.py --min-pass-rate 40   # exit 1 if below
+
+--min-pass-rate makes this usable as a CI gate (see .github/workflows/ci.yml's
+`eval` job) — pass a percentage (0-100); the process exits non-zero if the
+overall pass rate falls below it. Omit it to just run and report, exit 0 always.
 """
 import argparse
 import asyncio
@@ -89,7 +94,8 @@ async def run_benchmark() -> dict:
     }
 
 
-def print_report(report: dict) -> None:
+def print_report(report: dict) -> float:
+    """Returns the overall pass rate as a percentage (0-100)."""
     results = report["results"]
     print("\n" + "=" * 70)
     print(f"Model: {report['model']}")
@@ -109,29 +115,41 @@ def print_report(report: dict) -> None:
                 print(f"         note: {r['note']}")
 
     total_passed = sum(1 for r in results if r["passed"])
+    pass_rate = 100 * total_passed / len(results) if results else 0.0
     latencies = [r["latency_s"] for r in results]
     tps_values = [r["tokens_per_sec"] for r in results if r["tokens_per_sec"]]
 
     print("\n" + "-" * 70)
-    print(f"Overall: {total_passed}/{len(results)} passed ({100 * total_passed / len(results):.0f}%)")
+    print(f"Overall: {total_passed}/{len(results)} passed ({pass_rate:.0f}%)")
     if latencies:
         print(f"Latency: avg={sum(latencies)/len(latencies):.1f}s min={min(latencies):.1f}s max={max(latencies):.1f}s")
     if tps_values:
         print(f"Tokens/sec (generation only): avg={sum(tps_values)/len(tps_values):.2f}")
     print("-" * 70)
+    return pass_rate
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=str, default=None, help="Optional path to save the JSON report")
+    parser.add_argument(
+        "--min-pass-rate",
+        type=float,
+        default=None,
+        help="Exit 1 if the overall pass rate (percent) falls below this.",
+    )
     args = parser.parse_args()
 
     report = asyncio.run(run_benchmark())
-    print_report(report)
+    pass_rate = print_report(report)
 
     if args.out:
         Path(args.out).write_text(json.dumps(report, indent=2))
         print(f"\nSaved JSON report to {args.out}")
+
+    if args.min_pass_rate is not None and pass_rate < args.min_pass_rate:
+        print(f"\nFAIL: pass rate {pass_rate:.0f}% is below the required {args.min_pass_rate:.0f}%")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

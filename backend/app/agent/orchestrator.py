@@ -5,10 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.guardrails.input_guardrail import screen_input
 from app.guardrails.output_guardrail import screen_output
 from app.llm.base import LLMProvider
+from app.models import ApprovalStatus, PendingApproval
 from app.schemas import ChatMessage, PendingConfirmation
 from app.security import sign_confirmation, verify_confirmation
 from app.tools.registry import (
     ConfirmationRequiredError,
+    HumanApprovalRequiredError,
     InvalidToolArgumentsError,
     UnknownToolError,
     execute_tool,
@@ -38,16 +40,6 @@ Rules you must follow:
 # (assembled from raw tool arguments) and the loop-exhausted fallback message.
 
 
-async def _run_tool_call(
-    session: AsyncSession, name: str, arguments: dict, confirmed: bool = False
-) -> dict:
-    """Execute (or reject) one tool call, always returning something to feed back to the model."""
-    try:
-        return await execute_tool(session, name, arguments, confirmed=confirmed)
-    except (UnknownToolError, InvalidToolArgumentsError) as exc:
-        return {"ok": False, "error": str(exc)}
-
-
 def _sanitize_free_text(value: object) -> str:
     """A free-text tool argument (e.g. a refund `reason`) came from the customer's
     own message via the LLM, and is about to be echoed back into a confirmation
@@ -68,6 +60,19 @@ def _build_confirmation_summary(tool_name: str, arguments: dict) -> str:
         reason = _sanitize_free_text(arguments.get("reason"))
         return f"cancel order {arguments.get('order_id')} (reason: {reason})"
     return f"perform {tool_name} with {arguments}"
+
+
+async def _queue_for_human_approval(session: AsyncSession, exc: HumanApprovalRequiredError) -> PendingApproval:
+    approval = PendingApproval(
+        tool=exc.tool_name,
+        arguments=exc.validated_arguments,
+        reason=exc.reason,
+        status=ApprovalStatus.PENDING,
+    )
+    session.add(approval)
+    await session.commit()
+    record_event("human_approval_required", tool=exc.tool_name, reason=exc.reason, approval_id=approval.id)
+    return approval
 
 
 def _screen(text: str) -> str:
@@ -106,9 +111,24 @@ async def run_turn(
             )
 
         if confirm:
-            outcome = await _run_tool_call(
-                session, pending_confirmation.tool, pending_confirmation.arguments, confirmed=True
-            )
+            try:
+                outcome = await execute_tool(
+                    session, pending_confirmation.tool, pending_confirmation.arguments, confirmed=True
+                )
+            except HumanApprovalRequiredError as exc:
+                # The customer already agreed — but this action is large/risky enough
+                # (see human_approval_check on the tool's registry entry) that a
+                # customer's own "yes" isn't sufficient authorization by itself. Queue
+                # it for a staff member (see /api/approvals) instead of running it.
+                await _queue_for_human_approval(session, exc)
+                return (
+                    "Thanks for confirming — this one needs a quick review by our "
+                    "team before we can process it, since it's above our "
+                    "auto-approval limit. We'll take care of it shortly.",
+                    None,
+                )
+            except (UnknownToolError, InvalidToolArgumentsError) as exc:
+                outcome = {"ok": False, "error": str(exc)}
             record_event(
                 "confirmation_resolved",
                 tool=pending_confirmation.tool,

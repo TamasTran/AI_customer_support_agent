@@ -34,6 +34,13 @@ from app.tools.schemas import (
 REFUND_WINDOW_DAYS = 30
 NON_CANCELLABLE_STATUSES = {OrderStatus.SHIPPED, OrderStatus.DELIVERED, OrderStatus.CANCELLED, OrderStatus.REFUNDED}
 
+# Above this amount, a customer's own confirmation isn't sufficient authorization —
+# per the agent flow's "Need Human Approval?" step, distinct from "Need Customer
+# Confirmation?". The LLM can still request the refund, and the customer can still
+# confirm it, but request_refund won't actually run until a staff member also signs
+# off (see registry.py's human_approval_check / HumanApprovalRequiredError).
+HUMAN_APPROVAL_REFUND_THRESHOLD = 300.0
+
 
 class ToolError(Exception):
     """A business-rule failure that should be reported back to the caller, not raised as a 500."""
@@ -189,6 +196,17 @@ async def check_refund_eligibility(session: AsyncSession, args: CheckRefundEligi
 async def calculate_refund_amount(session: AsyncSession, args: CalculateRefundAmountInput) -> dict:
     order = await _load_order(session, args.order_id)
     return {"order_id": order.id, "refund_amount": float(order.total_amount), "currency": "USD"}
+
+
+async def refund_requires_human_approval(session: AsyncSession, args: RequestRefundInput) -> tuple[bool, str]:
+    order = await _load_order(session, args.order_id)
+    amount = float(order.total_amount)
+    if amount > HUMAN_APPROVAL_REFUND_THRESHOLD:
+        return True, (
+            f"Refund amount ${amount:.2f} exceeds the ${HUMAN_APPROVAL_REFUND_THRESHOLD:.2f} "
+            "auto-approval limit"
+        )
+    return False, ""
 
 
 async def request_refund(session: AsyncSession, args: RequestRefundInput) -> dict:

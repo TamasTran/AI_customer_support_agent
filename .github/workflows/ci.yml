@@ -11,11 +11,10 @@ jobs:
     name: Backend (lint + test)
     runs-on: ubuntu-latest
 
-    # No live Ollama in CI — the app is designed so its own test suite never needs
-    # one: guardrail/security tests are pure logic, and orchestrator tests drive a
-    # scripted FakeLLMProvider instead of a real model. Only scripts/benchmark_agent.py
-    # (quality-over-time tracking, not a pass/fail gate) needs a real local Ollama, so
-    # it intentionally does not run here — see README's "Status" section.
+    # No live Ollama needed for this job — the pytest suite is designed so it never
+    # needs one: guardrail/security tests are pure logic, and orchestrator tests
+    # drive a scripted FakeLLMProvider instead of a real model. The `eval` job below
+    # is the one that runs the real agent against a real (small, CI-sized) model.
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -64,6 +63,98 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -v
+
+  eval:
+    name: Agent evaluation (golden dataset)
+    runs-on: ubuntu-latest
+    needs: backend
+    timeout-minutes: 20
+
+    # Unlike the `backend` job (which never touches a live model), this job runs
+    # the real orchestrator against a real, CI-sized local Ollama model — the golden
+    # dataset (scripts/golden_dataset.py) is deliberately designed to need one. A
+    # small model is used so this stays fast and free on a hosted runner:
+    # llama3.2:1b measured 82% pass rate / ~6s avg turn locally (see the commit that
+    # added this job) vs. this project's normal local-dev model (llama3.1:8b,
+    # slower but more capable). The 60% gate is set comfortably below that observed
+    # rate to absorb normal sampling variance without being a rubber stamp — treat a
+    # failure here as "agent behavior regressed," not held to the same certainty as
+    # the deterministic pytest suite in the `backend` job.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: support
+          POSTGRES_PASSWORD: support
+          POSTGRES_DB: support
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U support -d support"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://support:support@localhost:5432/support
+      OLLAMA_BASE_URL: http://localhost:11434
+      OLLAMA_CHAT_MODEL: llama3.2:1b
+      OLLAMA_EMBEDDING_MODEL: nomic-embed-text
+      EMBEDDING_DIMENSION: "768"
+      APP_SECRET_KEY: ci-test-secret-not-for-production
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama server
+        run: |
+          nohup ollama serve > ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/tags > /dev/null && exit 0
+            sleep 1
+          done
+          echo "Ollama did not become ready in time" && cat ollama.log && exit 1
+
+      - name: Pull models
+        run: |
+          ollama pull llama3.2:1b
+          ollama pull nomic-embed-text
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Apply database migrations
+        run: uv run alembic upgrade head
+
+      - name: Seed synthetic data
+        run: |
+          uv run python scripts/generate_synthetic_data.py \
+            --customers 100 --products 50 --orders 500 --shipments 100 --tickets 100
+
+      - name: Run golden-dataset benchmark (gate at 60% pass rate)
+        run: uv run python scripts/benchmark_agent.py --out benchmark_report.json --min-pass-rate 60
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: backend/benchmark_report.json
 
   frontend:
     name: Frontend (typecheck + build)

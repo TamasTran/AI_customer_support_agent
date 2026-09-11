@@ -49,6 +49,12 @@ class TicketPriority(str, enum.Enum):
     URGENT = "urgent"
 
 
+class ApprovalStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class Customer(Base):
     __tablename__ = "customers"
 
@@ -151,3 +157,27 @@ class AgentTrace(Base):
     had_error: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class PendingApproval(Base):
+    """A mutating action the customer has already confirmed, but that also needs a
+    staff member's sign-off before it actually runs (see registry.py's
+    human_approval_check / HumanApprovalRequiredError) — e.g. a refund above the
+    auto-approval threshold. Reviewed via /api/approvals (main.py) or
+    scripts/review_approvals.py; neither is behind real staff authentication yet —
+    see the note in main.py's approval endpoints."""
+
+    __tablename__ = "pending_approvals"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tool: Mapped[str] = mapped_column(String(100))
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[ApprovalStatus] = mapped_column(
+        Enum(ApprovalStatus, name="approval_status"), default=ApprovalStatus.PENDING, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

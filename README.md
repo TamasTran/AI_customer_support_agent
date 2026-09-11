@@ -80,6 +80,23 @@ older `deprecated` version of a policy can never outrank the current one —
 see `backend/knowledge/refund-policy-v3-deprecated.md` for a worked example
 kept in the repo specifically to exercise that filter.
 
+### Human approval for high-risk actions
+
+Customer confirmation and staff approval are two separate tiers. A refund
+above `HUMAN_APPROVAL_REFUND_THRESHOLD` (`$300`, see
+`app/tools/implementations.py`) still needs a staff member's sign-off even
+after the customer has confirmed it — the action is queued instead of
+executed. Review the queue with either:
+
+```bash
+uv run python scripts/review_approvals.py --interactive
+```
+
+or `GET /api/approvals` / `POST /api/approvals/{id}/decide` directly. **There
+is no staff authentication in front of these yet** — a known, documented gap
+(see `app/main.py`'s approval endpoints) — don't expose them beyond local
+development without adding real auth first.
+
 ### Debugging a bad agent turn (tracing)
 
 Every `/api/chat` turn is recorded locally to Postgres — no external tracing
@@ -120,12 +137,23 @@ they're fast and deterministic. CI runs this on every push/PR — see
 `.github/workflows/ci.yml`.
 
 Separately, `scripts/benchmark_agent.py` runs the golden dataset against a real
-Ollama model end-to-end (see below) — that's a quality-over-time report, not a
-pass/fail CI gate, since it needs a live local model CI doesn't have.
+Ollama model end-to-end:
 
 ```bash
 uv run python scripts/benchmark_agent.py --out benchmark_report.json
+uv run python scripts/benchmark_agent.py --min-pass-rate 60   # exit 1 if below
 ```
+
+`--min-pass-rate` is what turns this into an actual CI gate — see the `eval`
+job in `.github/workflows/ci.yml`, which installs Ollama, pulls a small,
+CI-sized model (`llama3.2:1b` — fast enough to run the full golden dataset in
+well under 2 minutes on a hosted runner), seeds a small synthetic dataset,
+and fails the job below 60% pass rate. That threshold is set from a real
+measured run (`llama3.2:1b` scored 82% locally when this was added — see the
+commit), with headroom for normal sampling variance, not a guess. A small
+model naturally scores lower and less consistently than this project's normal
+local-dev model (`llama3.1:8b`); treat an `eval` failure as "agent behavior
+regressed," not with the same certainty as the deterministic `backend` job.
 
 ## Project layout
 
@@ -143,9 +171,9 @@ backend/
     security.py         # HMAC-signs the confirm handshake so a client can't execute a
                          # mutating action against arguments other than what was proposed
     tracing.py           # local structured trace log (agent_traces table) — no external service
-    models.py            # SQLAlchemy models (customers, orders, products, shipments, tickets, AgentTrace)
+    models.py            # SQLAlchemy models (..., AgentTrace, PendingApproval)
     db.py                # async SQLAlchemy session
-    main.py               # FastAPI app: /api/health, /api/chat
+    main.py               # FastAPI app: /api/health, /api/chat, /api/approvals
   alembic/                # DB migrations (business tables only — the knowledge base table
                            # is created by LlamaIndex's PGVectorStore on first ingest, not here)
   knowledge/                # policy source docs (Markdown + YAML frontmatter metadata)
@@ -153,8 +181,9 @@ backend/
     generate_synthetic_data.py
     ingest_knowledge.py     # indexes backend/knowledge/*.md
     golden_dataset.py      # deterministic eval cases (normal/ambiguous/policy/injection/...)
-    benchmark_agent.py      # runs the golden dataset against a live Ollama model
+    benchmark_agent.py      # runs the golden dataset against a live Ollama model; --min-pass-rate gates CI
     view_traces.py          # inspect recent agent_traces rows
+    review_approvals.py     # review/decide queued human-approval requests
   tests/                    # pytest suite (no live Ollama needed — see "Running tests")
 frontend/
   src/App.tsx         # minimal chat UI
@@ -174,9 +203,9 @@ local model before adding the next layer (see project plan):
 - [x] Phase 5 — RAG pipeline (LlamaIndex ingest/retrieve, status="active" filtering, search_knowledge_base tool)
 - [x] Phase 6 — Agent orchestration
 - [x] Phase 7 — Policy engine + permission checks (confirmation gate enforced in execute_tool, signed confirmation tokens)
-- [ ] Phase 8 — Human approval tier (beyond customer confirmation)
+- [x] Phase 8 — Human approval tier (refunds above threshold queue for staff sign-off, distinct from customer confirmation — see `/api/approvals` / `scripts/review_approvals.py`); endpoints are unauthenticated, a documented gap
 - [x] Phase 9 — Guardrails (input prompt-injection screening, output PII/system-prompt-leak screening)
-- [ ] Phase 10 — Full evaluation suite (golden dataset + benchmark script exist; no CI gate on it yet)
+- [x] Phase 10 — Full evaluation suite, with a real CI gate (`eval` job in `.github/workflows/ci.yml`, `--min-pass-rate` on `benchmark_agent.py`)
 - [x] Phase 11 (partial) — Local structured tracing per turn (tool calls, guardrail flags, latency, errors — see `scripts/view_traces.py`); no metrics dashboard/aggregation yet
 - [x] Phase 12 (partial) — CI (lint + test + typecheck + build on every push/PR); no Docker image / deployment pipeline yet
 

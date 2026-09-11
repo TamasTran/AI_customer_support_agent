@@ -55,3 +55,37 @@ async def pending_order(db_session, customer):
     db_session.add(o)
     await db_session.commit()
     return o
+
+
+@pytest_asyncio.fixture
+async def small_refundable_order(db_session, customer):
+    """Refund-eligible (status + within window) and below the human-approval
+    threshold — should auto-execute on customer confirmation alone."""
+    o = Order(
+        id="ORD-TEST-SMALL",
+        customer_id=customer.id,
+        status=OrderStatus.PAID,
+        total_amount=50.00,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db_session.add(o)
+    await db_session.commit()
+    return o
+
+
+@pytest_asyncio.fixture
+async def large_refundable_order(db_session, customer):
+    """Refund-eligible but above the human-approval threshold — customer
+    confirmation alone must not be enough to execute this one."""
+    o = Order(
+        id="ORD-TEST-LARGE",
+        customer_id=customer.id,
+        status=OrderStatus.PAID,
+        total_amount=500.00,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db_session.add(o)
+    await db_session.commit()
+    return o
